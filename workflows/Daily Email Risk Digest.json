@@ -1,0 +1,544 @@
+{
+  "name": "Daily Email Risk Digest",
+  "nodes": [
+    {
+      "parameters": {
+        "jsCode": "const config = $getWorkflowStaticData('global');\n\nconfig.SLA_HOURS = 16;\nconfig.emailRecipients = [\n  \"direactor@company.com\",\n  \"csm@company.com\"\n];\nconfig.VIP_DOMAINS = [\n  \"imp-customer.com\",\n  \"escalated-cucstomer.com\"\n];\nconfig.excludedSenderEmails = [\n  \"internal@company.com\"\n];\nconfig.excludedSenderDomains = [\n  \"google.com\"\n];\nconfig.escalationEmails = [\n  \"ceo@company.com\",\n  \"cto@company.com\"\n];\nconfig.emailSubject = \"Daily Email Risk Digest\";\n\nreturn config;"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        208,
+        112
+      ],
+      "id": "d5e98f43-f4a8-4d2c-ae30-b93fb3455d09",
+      "name": "Initialise Config"
+    },
+    {
+      "parameters": {
+        "operation": "getAll",
+        "limit": 500,
+        "simple": false,
+        "filters": {
+          "labelIds": [
+            "INBOX"
+          ],
+          "q": "=newer_than:15d subject:-\"win notice:\" from:({{ $json.excludedSenderEmails.map(item => `-${item}`).join(' ') }} {{ $json.excludedSenderDomains.map(item => `-${item}`).join(' ') }})"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.2,
+      "position": [
+        416,
+        112
+      ],
+      "id": "737c2eb7-1d00-43e4-a23e-76a796f65084",
+      "name": "Get Emails",
+      "webhookId": "c15cc004-940d-45d6-bd1b-6f0e9eb29ec4",
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "7Jsg14SfLVU6sqsQ",
+          "name": "Gmail account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const threadMap = new Map();\n\nfor (const item of $input.all()) {\n  const threadId = item.json.threadId;\n  const receivedMs = new Date(item.json.receivedAt).getTime();\n\n  if (!threadMap.has(threadId)) {\n    threadMap.set(threadId, {\n      item,\n      latestTs: receivedMs,\n      count: 1\n    });\n  } else {\n    const entry = threadMap.get(threadId);\n    entry.count += 1;\n\n    if (receivedMs > entry.latestTs) {\n      entry.item = item;\n      entry.latestTs = receivedMs;\n    }\n  }\n}\n\nconst result = [];\n\nfor (const [, entry] of threadMap.entries()) {\n  result.push({\n    json: {\n      ...entry.item.json,\n      isThread: entry.count > 1,\n      threadMessageCount: entry.count\n    }\n  });\n}\n\nreturn result;\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1136,
+        112
+      ],
+      "id": "06b80a6e-7780-48f6-b13f-66a9da1c14ce",
+      "name": "Collapse Threads"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": false,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "cd96b28d-6d2d-48c7-bea6-330eb5a922c0",
+              "leftValue": "={{ $json.from.address }}",
+              "rightValue": "notify@company.com",
+              "operator": {
+                "type": "string",
+                "operation": "notEquals"
+              }
+            },
+            {
+              "id": "51f050f7-d5d6-4648-af4d-c2364b352c58",
+              "leftValue": "={{ $json.from.address }}",
+              "rightValue": "internal@company.com",
+              "operator": {
+                "type": "string",
+                "operation": "notEquals"
+              }
+            },
+            {
+              "id": "64fd9acc-344a-4645-ad2c-7ba7e9d6407c",
+              "leftValue": "={{ $json.from.address }}",
+              "rightValue": "employees@company.com",
+              "operator": {
+                "type": "string",
+                "operation": "notEquals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {
+          "ignoreCase": true
+        }
+      },
+      "type": "n8n-nodes-base.filter",
+      "typeVersion": 2.3,
+      "position": [
+        1408,
+        112
+      ],
+      "id": "d3b1f981-316e-4a78-9f6e-4975a9eac5e2",
+      "name": "Filter Emails",
+      "alwaysOutputData": false,
+      "notesInFlow": true,
+      "notes": "Exclude internal senders"
+    },
+    {
+      "parameters": {
+        "jsCode": "const config = $getWorkflowStaticData('global');\n\nconst today = new Date().toLocaleDateString(\"en-US\", {\n  month: \"short\",\n  day: \"2-digit\",\n  year: \"numeric\",\n});\n\nconst items = $input.all();\n\n// ---- COUNT SUMMARY ----\nlet high = 0, medium = 0, low = 0;\n\nfor (const item of items) {\n  const s = Number(item.json.score);\n  if (s >= 3) high++;\n  else if (s >= 1.5) medium++;\n  else low++;\n}\n\nconst total = high + medium + low;\n\n// ---- HEADER ----\nlet headerLine = \"Daily Email Risk Digest\";\nif (total > 0) {\n  const parts = [];\n  if (high) parts.push(`${high} High`);\n  if (medium) parts.push(`${medium} Medium`);\n  if (low) parts.push(`${low} Low`);\n  headerLine = `${total} Email${total > 1 ? \"s\" : \"\"} Need Attention | ${parts.join(\", \")}`;\n}\n\n// ---- COLOR MAP (PRESENTATION ONLY) ----\nfunction chipColor(color) {\n  switch (color) {\n    case \"red\": return \"background:#e74c3c;color:#fff;\";\n    case \"amber\": return \"background:#f1c40f;color:#000;\";\n    case \"blue\": return \"background:#3498db;color:#fff;\";\n    case \"purple\": return \"background:#8e44ad;color:#fff;\";\n    case \"grey\": return \"background:#ecf0f1;color:#333;\";\n    default: return \"background:#ecf0f1;color:#333;\";\n  }\n}\n\n// ---- RISK LABEL (PRESENTATION) ----\nfunction getRiskLabel(score) {\n  if (score >= 3) return { label: \"HIGH RISK\", color: \"red\" };\n  if (score >= 1.5) return { label: \"MEDIUM RISK\", color: \"amber\" };\n  return { label: \"LOW RISK\", color: \"grey\" };\n}\n\n// ---- HTML START ----\nlet html = `\n<div style=\"font-family: Arial, sans-serif; background:#f6f8fa; padding:20px;\">\n  <div style=\"max-width:700px; margin:auto; background:#ffffff; padding:20px; border-radius:8px;\">\n    <h2 style=\"margin:0; color:#222;\">${headerLine}</h2>\n    <p style=\"margin-top:4px; color:#666; font-size:14px;\">Date: ${today}</p>\n    <hr style=\"border:none; border-top:1px solid #eaeaea;\"/>\n`;\n\nlet counter = 0;\n\n// ---- EMAIL CARDS ----\nfor (const item of items) {\n  const mail = item.json;\n  counter++;\n\n  const gmailLink = `https://mail.google.com/mail/u/0/#inbox/${mail.id}`;\n  const risk = getRiskLabel(Number(mail.score));\n\n  html += `\n    <div style=\"border:1px solid #eaeaea; border-radius:6px; padding:14px; margin-top:16px;\">\n      \n      <!-- Subject -->\n      <div style=\"font-size:15px; font-weight:bold; color:#222;\">\n        #${counter} • \n        <a href=\"${gmailLink}\" target=\"_blank\"\n           style=\"color:#222; text-decoration:none;\"\n           onmouseover=\"this.style.textDecoration='underline'\"\n           onmouseout=\"this.style.textDecoration='none'\">\n          ${mail.subject}\n        </a>\n      </div>\n\n      <!-- Risk Label + Score -->\n      <div style=\"margin-top:6px;\">\n        <span style=\"\n          display:inline-block;\n          ${chipColor(risk.color)}\n          padding:4px 8px;\n          font-size:12px;\n          border-radius:4px;\n          margin-right:6px;\n          white-space:nowrap;\n        \">\n          ${risk.label}\n        </span>\n\n        <span style=\"\n          display:inline-block;\n          background:#f4f6f8;\n          color:#333;\n          padding:4px 8px;\n          font-size:12px;\n          border-radius:4px;\n          white-space:nowrap;\n        \">\n          Risk Score: ${Number(mail.score).toFixed(2)}\n        </span>\n      </div>\n\n      <!-- From -->\n      <div style=\"margin-top:6px; color:#666; font-size:13px;\">\n        From: ${mail.from.address}\n      </div>\n\n      <!-- Per-email summary -->\n      ${\n        mail.summary\n          ? `\n          <div style=\"margin-top:8px; font-size:13px; color:#555;\">\n            <strong>Summary:</strong> ${mail.summary}\n          </div>\n          `\n          : \"\"\n      }\n\n      <!-- Chips -->\n      <div style=\"margin-top:10px;\">\n  `;\n\n  for (const chip of mail.chips || []) {\n    html += `\n      <span style=\"\n        display:inline-block;\n        ${chipColor(chip.color)}\n        padding:4px 8px;\n        font-size:12px;\n        border-radius:4px;\n        margin-right:6px;\n        margin-bottom:6px;\n        white-space:nowrap;\n      \">\n        ${chip.label}\n      </span>\n    `;\n  }\n\n  html += `\n      </div>\n    </div>\n  `;\n}\n\n// ---- FOOTER ----\nhtml += `\n    <hr style=\"border:none; border-top:1px solid #eaeaea; margin-top:20px;\"/>\n    <p style=\"font-size:12px; color:#999;\">\n      Tip: Click the subject to open the email in Gmail.\n    </p>\n  </div>\n</div>\n`;\n\nreturn [{\n  json: {\n    subject: config.emailSubject,\n    recipients: config.emailRecipients,\n    html\n  }\n}];\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3360,
+        128
+      ],
+      "id": "96b8703e-6976-466b-9d7c-d5ce7d6a577a",
+      "name": "Build Email Digest"
+    },
+    {
+      "parameters": {
+        "sendTo": "recipient1@company.com,recipient2@company.com",
+        "subject": "=Daily Email Digest",
+        "message": "={{ $json.html }}",
+        "options": {
+          "appendAttribution": false,
+          "senderName": "Services Ops"
+        }
+      },
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.2,
+      "position": [
+        3616,
+        128
+      ],
+      "id": "73177a83-6009-4ee3-bb20-4fd35f780a81",
+      "name": "Send Risk Digest",
+      "webhookId": "4929cbbc-0f8b-4d9d-bcb0-a30b7242cd4c",
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "7Jsg14SfLVU6sqsQ",
+          "name": "Gmail account"
+        }
+      }
+    },
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        224
+      ],
+      "id": "a58d139d-a714-463e-aeb4-01620094a267",
+      "name": "Manual Trigger"
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "triggerAtHour": 9
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.3,
+      "position": [
+        0,
+        0
+      ],
+      "id": "e1610335-49c9-4868-9a10-8280dd1c262b",
+      "name": "Daily 9 AM Schedule",
+      "disabled": true
+    },
+    {
+      "parameters": {
+        "jsCode": "const config = $getWorkflowStaticData('global');\n\n// ---- CONFIG ----\nconst SLA_HOURS = Number(config.SLA_HOURS ?? 24);\nconst VIP_DOMAINS = config.VIP_DOMAINS ?? [];\nconst ESCALATION_EMAILS = config.escalationEmails ?? [];\n\n// ---- PRECOMPUTED SET ----\nconst escalationSet = new Set(\n  ESCALATION_EMAILS.map(e => e.toLowerCase())\n);\n\n// ---- HELPERS ----\nfunction getResponseRisk(pendingHours) {\n  return Math.min(1, pendingHours / SLA_HOURS);\n}\n\nfunction getUrgencyFactor(pendingHours) {\n  return 1 + Math.log2(1 + pendingHours / 4);\n}\n\nfunction isVipSender(email) {\n  const domain = email?.split(\"@\")[1]?.toLowerCase();\n  return VIP_DOMAINS.includes(domain);\n}\n\nfunction isEscalated(recipients) {\n  if (!Array.isArray(recipients)) return false;\n  return recipients.some(r => escalationSet.has(r.toLowerCase()));\n}\n\nfunction formatPendingLabel(hours) {\n  if (hours < 48) return `${Math.round(hours)}h Since Pending Reply`;\n  return `${Math.round(hours / 24)}d Since Pending Reply`;\n}\n\n// ---- MAIN ----\nconst now = Date.now();\n\nfor (const item of $input.all()) {\n  const receivedAt = new Date(item.json.receivedAt).getTime();\n  const pendingHours = (now - receivedAt) / (1000 * 60 * 60);\n\n  const responseRisk = getResponseRisk(pendingHours);\n  const urgencyFactor = getUrgencyFactor(pendingHours);\n\n  const vip = isVipSender(item.json.from?.address);\n  const escalated = isEscalated(item.json.recipients);\n  const sentimentRisk = Number(item.json.isNegativeSentiment ?? 0);\n\n  const escalationRisk = escalated ? 1 : 0;\n\n  const baseRisk =\n    0.55 * responseRisk +\n    0.30 * escalationRisk +\n    0.15 * sentimentRisk;\n\n  let importanceMultiplier = 1.0;\n  if (vip) importanceMultiplier = 1.2;\n  if (escalated) importanceMultiplier = Math.max(importanceMultiplier, 1.5);\n\n  const finalScore =\n    baseRisk * urgencyFactor * importanceMultiplier;\n\n  // ---- CHIPS (WITH COLORS) ----\n  const chips = [];\n\n  // Pending Reply\n  chips.push({\n    label: formatPendingLabel(pendingHours),\n    color: pendingHours >= SLA_HOURS ? \"red\" : \"amber\"\n  });\n\n  // SLA Breach\n  // if (pendingHours >= SLA_HOURS) {\n  //   chips.push({ label: \"SLA Breached\", color: \"red\" });\n  // }\n\n  // VIP\n  if (vip) {\n    chips.push({ label: \"VIP Account\", color: \"purple\" });\n  }\n\n  // Escalation\n  if (escalated) {\n    chips.push({ label: \"Escalated\", color: \"blue\" });\n  }\n\n  // Negative sentiment\n  if (sentimentRisk > 0) {\n    chips.push({ label: \"Negative Sentiment\", color: \"red\" });\n  }\n\n  // ---- ATTACH ----\n  item.json.pendingHours = Math.round(pendingHours);\n  item.json.response_risk = Number(responseRisk.toFixed(5));\n  item.json.urgency_factor = Number(urgencyFactor.toFixed(5));\n  item.json.base_risk = Number(baseRisk.toFixed(5));\n  item.json.importance_multiplier = importanceMultiplier;\n  item.json.score = Number(finalScore.toFixed(5));\n\n  item.json.isVipSender = vip;\n  item.json.isEscalated = escalated;\n  item.json.chips = chips;\n}\n\n// ---- SORT DESC ----\nreturn $input.all().sort((a, b) => b.json.score - a.json.score);\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2960,
+        128
+      ],
+      "id": "33559417-c8a0-4f6e-b48e-d0c01b1f40e6",
+      "name": "Build Risk Score"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// 1. Extract the raw text from the AI node\nlet rawText = $input.item.json.output[0].content[0].text;\n\n// 2. Clean the text (Remove markdown backticks if they exist)\nconst cleanText = rawText.replace(/```json/g, '').replace(/```/g, '').trim();\n\ntry {\n  const parsed = JSON.parse(cleanText);\n\n  // 3. Return the data, mapping snake_case to camelCase for consistency\n  return {\n    summary: parsed.summary || \"No summary provided\",\n    threadClosed: parsed.thread_closed ?? false,\n    is_negative_sentiment: parsed.is_negative_sentiment ?? false\n  };\n} catch (error) {\n  // If it still fails, this will tell you exactly why in the output\n  return {\n    summary: \"Parsing Error: \" + error.message,\n    threadClosed: false,\n    is_negative_sentiment: false,\n    debug_raw_text: cleanText // This helps you see what actually came in\n  };\n}"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2192,
+        0
+      ],
+      "id": "134ab498-af72-4dba-860c-de7b7a21a3ad",
+      "name": "Parse AI Parameters"
+    },
+    {
+      "parameters": {
+        "modelId": {
+          "__rl": true,
+          "value": "gpt-5-nano",
+          "mode": "list",
+          "cachedResultName": "GPT-5-NANO"
+        },
+        "responses": {
+          "values": [
+            {
+              "role": "system",
+              "content": "You analyze professional customer emails.\n\nYour task:\n1. Decide if the email indicates the conversation is CLOSED.\n2. Decide if the sentiment of the email is NEGATIVE.\n3. Provide a concise 2-3 line summary of the email's core intent.\n\nBe conservative.\nIf you are unsure, assume:\n- thread_closed = false\n- is_negative_sentiment = false\n\nEmail Subject: {{ $json.subject }}\nEmail Body: {{ $json.body?.slice(0, 1000) }}\n\nReturn ONLY valid JSON in this exact format:\n{\n  \"thread_closed\": boolean,\n  \"is_negative_sentiment\": boolean,\n  \"summary\": \"string\"\n}"
+            },
+            {
+              "content": "=Analyze the email below.\n\nThread closure rules:\n- thread_closed = true ONLY if the sender clearly indicates no further action is needed\n- Explicit confirmation of resolution counts as closed\n- Polite acknowledgements (e.g., “thanks”) alone do NOT mean closed\n- If the sender expects follow-up, mark thread_closed = false\n\nNegative sentiment rules:\n- is_negative_sentiment = true if the email shows frustration, complaint, dissatisfaction, pressure, or escalation\n- Factual, polite, or cooperative messages are NOT negative\n\nSummary rules:\n- Provide a concise 2-3 line summary of the email's core intent.\n\nEmail subject:\n{{ $json.subject }}\n\nEmail body:\n{{ $json.body?.slice(0, 1000) }}\n\nReturn JSON exactly in this format:\n{\n  \"thread_closed\": boolean,\n  \"is_negative_sentiment\": boolean,\n  \"summary\": \"string\"\n}"
+            }
+          ]
+        },
+        "builtInTools": {},
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.openAi",
+      "typeVersion": 2.1,
+      "position": [
+        1856,
+        0
+      ],
+      "id": "c07ae8b1-73bd-4bfa-9c7e-599bf179fafb",
+      "name": "Add AI Parameters",
+      "credentials": {
+        "openAiApi": {
+          "id": "vcwa36c5veTexyZn",
+          "name": "OpenAi account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "mode": "combine",
+        "combineBy": "combineByPosition",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3.2,
+      "position": [
+        2720,
+        128
+      ],
+      "id": "f781d093-5f30-4064-9832-e7c5b6a5c5dc",
+      "name": "Merge"
+    },
+    {
+      "parameters": {
+        "jsCode": "function safeAddressList(field) {\n  if (!field?.value) return [];\n  if (Array.isArray(field.value)) {\n    return field.value.map(v => v.address?.toLowerCase()).filter(Boolean);\n  }\n  if (field.value.address) {\n    return [field.value.address.toLowerCase()];\n  }\n  return [];\n}\n\nfunction getSender(mail) {\n  return (\n    mail.json.replyTo?.value?.[0]?.address ||\n    mail.json.from?.value?.[0]?.address ||\n    null\n  );\n}\n\n/**\n * Extract latest meaningful email body from n8n Gmail `json.text`\n * Safe for LLM usage.\n */\nfunction extractLatestBodyFromText(text, maxChars = 1500) {\n  if (!text) return \"\";\n\n  let cleaned = text;\n\n  const quotePatterns = [\n    /^from: .*$/im,\n    /^on .* wrote:$/im,\n    /^sent: .*$/im,\n    /^to: .*$/im,\n    /^subject: .*$/im,\n    /^-----original message-----/im,\n    /^-----forwarded message-----/im\n  ];\n\n  for (const pattern of quotePatterns) {\n    const idx = cleaned.search(pattern);\n    if (idx !== -1) {\n      cleaned = cleaned.substring(0, idx);\n    }\n  }\n\n  cleaned = cleaned\n    .split(\"\\n\")\n    .filter(line => !line.trim().startsWith(\">\"))\n    .join(\"\\n\");\n\n  const signatureMarkers = [\n    \"\\n--\\n\",\n    \"\\n—\\n\",\n    \"\\nRegards,\",\n    \"\\nThanks,\",\n    \"\\nBest,\"\n  ];\n\n  for (const marker of signatureMarkers) {\n    const idx = cleaned.indexOf(marker);\n    if (idx !== -1) {\n      cleaned = cleaned.substring(0, idx);\n      break;\n    }\n  }\n\n  cleaned = cleaned\n    .replace(/\\r\\n/g, \"\\n\")\n    .replace(/\\n{3,}/g, \"\\n\\n\")\n    .replace(/[ \\t]{2,}/g, \" \")\n    .trim();\n\n  return cleaned.length > maxChars ? cleaned.slice(0, maxChars) : cleaned;\n}\n\nfunction getAllRecipients(mail) {\n  const recipients = [\n    ...safeAddressList(mail.to),\n    ...safeAddressList(mail.cc),\n    ...safeAddressList(mail.bcc)\n  ];\n\n  return [...new Set(recipients)];\n}\n\nreturn $input.all().map(mail => ({\n  json: {\n    id: mail.json.id,\n    threadId: mail.json.threadId,\n    subject: mail.json.subject || \"\",\n    from: getSender(mail),\n    to: safeAddressList(mail.json.to),\n    cc: safeAddressList(mail.json.cc),\n    bcc: safeAddressList(mail.json.bcc),\n    recipients: getAllRecipients(mail.json),\n    receivedAt: mail.json.date,\n    labelIds: mail.json.labelIds || [],\n    body: extractLatestBodyFromText(mail.json.text)\n  }\n}));\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        640,
+        112
+      ],
+      "id": "2407cb90-54c1-4cbc-ba91-b7c82d523773",
+      "name": "Normalise Threads"
+    },
+    {
+      "parameters": {
+        "operation": "addLabels",
+        "messageId": "={{ $json.id }}",
+        "labelIds": [
+          "Label_260119538805019999"
+        ]
+      },
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.2,
+      "position": [
+        896,
+        224
+      ],
+      "id": "787c0bf2-d765-4b12-a643-82034ac336e7",
+      "name": "Add AI_CHECKED Label",
+      "webhookId": "bf726962-1627-4158-a145-c52d47997a1b",
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "7Jsg14SfLVU6sqsQ",
+          "name": "Gmail account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "return [];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1664,
+        112
+      ],
+      "id": "3aa55589-a833-4d36-91ae-cf824a0b3ce8",
+      "name": "Mock Gmail Data",
+      "disabled": true
+    },
+    {
+      "parameters": {
+        "operation": "addLabels",
+        "messageId": "={{ $json.id }}",
+        "labelIds": [
+          "Label_15",
+          "Label_12"
+        ]
+      },
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.2,
+      "position": [
+        3184,
+        240
+      ],
+      "id": "13bb99c6-168d-4612-b6fe-b35dca00bd53",
+      "name": "Add AI_RISK & AI_NEEDS_REPLY Labels",
+      "webhookId": "a858a97d-5062-437c-8da0-ed14041c2a74",
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "7Jsg14SfLVU6sqsQ",
+          "name": "Gmail account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "return [];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2400,
+        0
+      ],
+      "id": "0c4654ba-ed18-4689-8826-9efc4152d8dd",
+      "name": "Mock AI Params",
+      "disabled": true
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Initialise Config": {
+      "main": [
+        [
+          {
+            "node": "Get Emails",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Emails": {
+      "main": [
+        [
+          {
+            "node": "Normalise Threads",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Collapse Threads": {
+      "main": [
+        [
+          {
+            "node": "Filter Emails",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Filter Emails": {
+      "main": [
+        [
+          {
+            "node": "Mock Gmail Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Email Digest": {
+      "main": [
+        [
+          {
+            "node": "Send Risk Digest",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Manual Trigger": {
+      "main": [
+        [
+          {
+            "node": "Initialise Config",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Daily 9 AM Schedule": {
+      "main": [
+        [
+          {
+            "node": "Initialise Config",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Risk Score": {
+      "main": [
+        [
+          {
+            "node": "Add AI_RISK & AI_NEEDS_REPLY Labels",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Build Email Digest",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse AI Parameters": {
+      "main": [
+        [
+          {
+            "node": "Mock AI Params",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Add AI Parameters": {
+      "main": [
+        [
+          {
+            "node": "Parse AI Parameters",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Merge": {
+      "main": [
+        [
+          {
+            "node": "Build Risk Score",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalise Threads": {
+      "main": [
+        [
+          {
+            "node": "Collapse Threads",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Add AI_CHECKED Label",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Mock Gmail Data": {
+      "main": [
+        [
+          {
+            "node": "Add AI Parameters",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Merge",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send Risk Digest": {
+      "main": [
+        []
+      ]
+    },
+    "Mock AI Params": {
+      "main": [
+        [
+          {
+            "node": "Merge",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "availableInMCP": false
+  },
+  "versionId": "64b82ee4-4546-44ae-b338-7b191f8d6c4b",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "dc5002d01afd9da3c2d1d10a235a98e09ca5170572206f9ea0037204c7237819"
+  },
+  "id": "Do5qkzb20sbA5xG2",
+  "tags": []
+}
